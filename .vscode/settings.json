@@ -1,0 +1,11 @@
+{
+  // El explorador de pruebas de VS Code descubre las 63 pruebas con esto.
+  "python.testing.unittestEnabled": true,
+  "python.testing.pytestEnabled": false,
+  "python.testing.unittestArgs": ["-v", "-s", "tests", "-p", "test_*.py"],
+  "python.analysis.extraPaths": ["${workspaceFolder}"],
+  "files.exclude": {
+    "**/__pycache__": true,
+    "build/_work": true
+  }
+}

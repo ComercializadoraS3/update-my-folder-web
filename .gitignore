@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+dist/
+build/_work/
+build/UpdateMyFolder/
+*.spec.bak
+.venv/

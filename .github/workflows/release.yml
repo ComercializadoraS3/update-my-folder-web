@@ -1,0 +1,108 @@
+# Publica una version nueva en cada push a main.
+#
+# El actualizador de la aplicacion consulta el ultimo release de GitHub, asi
+# que "publicar" es exactamente eso: subir la version, compilar el exe y crear
+# el release con los zip. El trabajo real lo hace build/publish.py; aqui solo
+# se encadenan los pasos y se devuelve a main el commit con la version nueva.
+#
+# El salto de version sale del mensaje del commit:
+#   feat: ...                 1.2.3 -> 1.3.0
+#   fix: ... (o cualquier otro)   1.2.3 -> 1.2.4
+#   feat!: ... / BREAKING CHANGE  1.2.3 -> 2.0.0
+#
+# Para saltarse la publicacion en un push concreto, escribe [skip release] en
+# el mensaje del commit.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.gitignore'
+      - '.vscode/**'
+      - '.claude/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version exacta (X.Y.Z) o major | minor | patch'
+        required: false
+        default: 'patch'
+
+# Necesario para empujar el commit de version y crear el release.
+permissions:
+  contents: write
+
+# Dos publicaciones a la vez se pisarian el tag y el numero de version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # El paquete es un .exe de Windows: tiene que compilarse en Windows.
+    runs-on: windows-latest
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Ejecutar pruebas
+        run: python -m unittest discover -s tests -v
+
+      # El mensaje del commit se pasa por variable de entorno y por archivo,
+      # nunca interpolado en la linea de comandos: puede tener saltos de
+      # linea y comillas que romperian el shell.
+      - name: Preparar notas de version
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          $notes = if ($env:COMMIT_MESSAGE) { $env:COMMIT_MESSAGE } else { "Publicacion manual" }
+          Set-Content -Path notas.txt -Value $notes -Encoding utf8
+
+      - name: Subir version, compilar y empaquetar
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          BUMP: ${{ github.event.inputs.version || 'auto' }}
+        run: python build/publish.py --bump $env:BUMP --repo $env:GITHUB_REPOSITORY
+
+      - name: Leer la version publicada
+        id: version
+        run: |
+          $v = python -c "import sys; sys.path.insert(0, '.'); from app.version import __version__; print(__version__)"
+          "value=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Devolver el commit de version a main
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/version.py
+          git commit -m "chore: version ${{ steps.version.outputs.value }} [skip ci]"
+          git push origin HEAD:main
+
+      # El release se crea sobre el commit de la version, no sobre la punta de
+      # main: si alguien empuja mientras compila, el tag sigue apuntando al
+      # codigo que se acaba de empaquetar.
+      - name: Crear el release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          gh release create "v$env:VERSION" `
+            "dist/UpdateMyFolder-$env:VERSION.zip" `
+            "dist/UpdateMyFolder-$env:VERSION.zip.sha256" `
+            "dist/UpdateMyFolder-$env:VERSION-instalador.zip" `
+            "dist/manifest.json" `
+            --title "v$env:VERSION" `
+            --notes-file notas.txt `
+            --target (git rev-parse HEAD)
