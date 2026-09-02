@@ -70,6 +70,23 @@ El botón **Probar reglas contra el origen** recorre el árbol real y muestra qu
 entra y qué queda fuera. Conviene usarlo: depurar patrones a ciegas es la forma
 más rápida de copiar de menos sin darse cuenta.
 
+#### Omisiones por defecto
+
+Todo perfil nuevo nace con esta lista puesta (`DEFAULT_EXCLUDE` en
+`app/config.py`): código fuente, temporales y archivos de estado que cada
+instalación regenera, y que copiados de un entorno a otro pisan la
+configuración del destino.
+
+```
+*.cs   *.tmp   *.rpt   *.pdb   *.rsp
+web.config   lastreorg.dat   client.log   lastcalltree.info   log.config
+/reorgs/   /PublicTempStorage/   /PrivateTempStorage/
+```
+
+Se pueden quitar o editar como cualquier otro patrón; si vacías la lista, se
+respeta vacía. El botón **Omisiones por defecto** las vuelve a añadir sin tocar
+lo que ya tengas escrito.
+
 ### Dónde queda todo
 
 ```

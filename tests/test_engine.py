@@ -12,7 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.comparer import Status, compare                       # noqa: E402
-from app.config import Profile, auto_workers, is_network_path  # noqa: E402
+from app.config import (DEFAULT_EXCLUDE, Profile, auto_workers,  # noqa: E402
+                        is_network_path)
 from app.copier import CopyStats, run_copy                     # noqa: E402
 from app.rules import RuleSet                                  # noqa: E402
 from app.scanner import scan_both, scan_tree                   # noqa: E402
@@ -240,6 +241,36 @@ class TestWorkerHeuristics(unittest.TestCase):
     def test_zero_threads_means_automatic(self):
         profile = Profile(name="x", source="C:/a", dest="C:/b", threads=0)
         self.assertEqual(profile.workers_for("copy"), auto_workers("copy", "C:/a", "C:/b"))
+
+
+class TestDefaultExclusions(unittest.TestCase):
+    """Un perfil nuevo nace con las omisiones del despliegue ya puestas."""
+
+    def test_new_profile_carries_the_defaults(self):
+        self.assertEqual(Profile().exclude, DEFAULT_EXCLUDE)
+
+    def test_each_profile_gets_its_own_list(self):
+        first, second = Profile(), Profile()
+        first.exclude.append("*.bak")
+        self.assertNotIn("*.bak", second.exclude)
+        self.assertNotIn("*.bak", DEFAULT_EXCLUDE)
+
+    def test_an_empty_list_saved_by_the_user_is_respected(self):
+        # Quien vacia la lista a proposito no debe encontrarsela repuesta
+        # en el siguiente arranque.
+        self.assertEqual(Profile.from_dict({"name": "x", "exclude": []}).exclude, [])
+
+    def test_the_defaults_decide_over_real_paths(self):
+        rules = RuleSet([], DEFAULT_EXCLUDE)
+        for omitted in ("Form1.cs", "src/Form1.cs", "salida.tmp", "web.config",
+                        "client.log", "bin/app.pdb", "lastcalltree.info"):
+            self.assertFalse(rules.accepts_file(omitted), omitted)
+        for kept in ("Form1.dll", "datos.xml", "docs/readme.txt", "app.config"):
+            self.assertTrue(rules.accepts_file(kept), kept)
+        # Las tres carpetas van ancladas a la raiz: se podan ahi y no mas abajo.
+        self.assertTrue(rules.dir_excluded("reorgs"))
+        self.assertTrue(rules.dir_excluded("PrivateTempStorage"))
+        self.assertFalse(rules.dir_excluded("datos/reorgs"))
 
 
 if __name__ == "__main__":

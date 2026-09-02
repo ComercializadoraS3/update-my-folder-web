@@ -79,13 +79,36 @@ def auto_workers(kind: str, *paths: str) -> int:
     return 32 if remote else min(16, cpu * 2)       # copia
 
 
+# Omisiones con las que nace todo perfil nuevo: codigo fuente, temporales y
+# archivos de estado que cada instalacion genera por su cuenta. Copiarlos de un
+# entorno a otro no aporta nada y en algunos casos (web.config, log.config)
+# pisa la configuracion propia del destino.
+DEFAULT_EXCLUDE = [
+    "*.cs",
+    "*.tmp",
+    "*.rpt",
+    "*.pdb",
+    "*.rsp",
+    "web.config",
+    "lastreorg.dat",
+    "client.log",
+    "lastcalltree.info",
+    "log.config",
+    "/reorgs/",
+    "/PublicTempStorage/",
+    "/PrivateTempStorage/",
+]
+
+
 @dataclass
 class Profile:
     name: str = "Predeterminado"
     source: str = ""
     dest: str = ""
     include: list[str] = field(default_factory=list)
-    exclude: list[str] = field(default_factory=list)
+    # Una copia por perfil: la lista es editable y no debe compartirse entre
+    # perfiles ni mutar la constante.
+    exclude: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE))
     copy_all: bool = False
     verify_content: bool = False
     dry_run: bool = False

@@ -10,7 +10,8 @@ from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
 
 from ..comparer import format_size
-from ..config import AppConfig, Profile, config_path, data_dir, log_dir
+from ..config import (DEFAULT_EXCLUDE, AppConfig, Profile, config_path, data_dir,
+                      log_dir)
 from ..rules import RuleSet, compile_rule
 from ..scanner import scan_tree
 from ..version import APP_TITLE, __version__
@@ -231,6 +232,12 @@ class ConfigDialog(ctk.CTkToplevel):
         ctk.CTkButton(actions, text="Preajuste web", width=140, fg_color="transparent",
                       border_width=1,
                       command=lambda: self.apply_preset(_PRESET_WEB)).grid(row=0, column=2)
+        # Los perfiles nuevos ya traen estas omisiones; el boton esta para
+        # recuperarlas en un perfil viejo o despues de vaciar la lista.
+        ctk.CTkButton(actions, text="Omisiones por defecto", width=180,
+                      fg_color="transparent", border_width=1,
+                      command=lambda: self.apply_preset(DEFAULT_EXCLUDE)).grid(
+            row=0, column=3, padx=8)
 
         help_box = ctk.CTkTextbox(tab, height=170, font=("Consolas", 11),
                                   fg_color=("gray92", "gray14"))
