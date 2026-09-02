@@ -82,7 +82,13 @@ def auto_workers(kind: str, *paths: str) -> int:
 # Canal de actualizacion por defecto. Se deja escrito en el codigo para que una
 # instalacion nueva encuentre las versiones sin que nadie configure nada; el
 # usuario puede apuntar a otro repositorio o a un manifest.json propio desde
-# Configuracion -> Avanzado, y vaciarlo desactiva la busqueda.
+# Configuracion -> Avanzado.
+#
+# Un campo vacio significa "sin configurar", no "desactivado": vuelve a este
+# valor al cargar. Es lo que permite que una instalacion antigua, cuyo
+# config.json guarda la URL en blanco de cuando no habia canal, empiece a
+# recibir actualizaciones con solo instalar una version nueva. Para no buscar
+# actualizaciones esta la casilla auto_check_updates.
 DEFAULT_UPDATE_URL = "https://github.com/ComercializadoraS3/update-my-folder-web"
 
 
@@ -190,7 +196,7 @@ class AppConfig:
         cfg = cls()
         cfg.profiles = [Profile.from_dict(p) for p in raw.get("profiles", [])] or [Profile()]
         cfg.active_profile = raw.get("active_profile", cfg.profiles[0].name)
-        cfg.update_url = raw.get("update_url", DEFAULT_UPDATE_URL)
+        cfg.update_url = raw.get("update_url") or DEFAULT_UPDATE_URL
         cfg.auto_check_updates = bool(raw.get("auto_check_updates", True))
         cfg.appearance = raw.get("appearance", "system")
         cfg.max_rows_display = int(raw.get("max_rows_display", 5000))

@@ -107,9 +107,13 @@ instalación nueva busca actualizaciones sin que nadie toque nada:
 https://github.com/ComercializadoraS3/update-my-folder-web
 ```
 
-Se cambia en **Configuración → Avanzado → URL de actualización**; dejarlo vacío
-desactiva la búsqueda. Se acepta también una URL de la API de GitHub o un
-`manifest.json` propio con
+Se cambia en **Configuración → Avanzado → URL de actualización**. Dejarlo vacío
+no desactiva nada: significa "sin configurar" y vuelve al valor de fábrica al
+arrancar, que es lo que hace que una instalación antigua empiece a recibir
+actualizaciones con solo instalarle una versión nueva. Para no buscar
+actualizaciones, quita la casilla **Buscar actualizaciones al iniciar**.
+
+Se acepta también una URL de la API de GitHub o un `manifest.json` propio con
 los campos `version`, `url`, `sha256` y `notes`.
 
 ### Publicar automaticamente (lo normal)

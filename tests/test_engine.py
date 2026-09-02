@@ -290,10 +290,18 @@ class TestDefaultUpdateChannel(unittest.TestCase):
     def test_an_old_config_without_the_key_gets_the_channel(self):
         self.assertEqual(self._load({"profiles": []}).update_url, DEFAULT_UPDATE_URL)
 
-    def test_an_empty_url_saved_by_the_user_is_respected(self):
-        # Vaciar el campo es como se desactiva la busqueda; reponerlo en cada
-        # arranque seria ignorar esa decision.
-        self.assertEqual(self._load({"update_url": ""}).update_url, "")
+    def test_an_empty_url_falls_back_to_the_channel(self):
+        # Las instalaciones anteriores al canal guardan la URL en blanco. Si se
+        # respetara ese vacio nunca recibirian una actualizacion, que es justo
+        # lo que hay que arreglar. Desactivar la busqueda es cosa de la casilla.
+        self.assertEqual(self._load({"update_url": ""}).update_url, DEFAULT_UPDATE_URL)
+
+    def test_a_custom_url_is_never_overwritten(self):
+        propia = "https://intranet.local/umf/manifest.json"
+        self.assertEqual(self._load({"update_url": propia}).update_url, propia)
+
+    def test_the_checkbox_is_what_disables_the_search(self):
+        self.assertFalse(self._load({"auto_check_updates": False}).auto_check_updates)
 
     def test_the_channel_resolves_to_the_releases_api(self):
         self.assertEqual(
