@@ -5,3 +5,6 @@ build/_work/
 build/UpdateMyFolder/
 *.spec.bak
 .venv/
+
+# Ajustes personales de Claude Code, no del proyecto
+.claude/settings.local.json
