@@ -1,5 +1,6 @@
 """Pruebas de integracion del motor: recorrido, comparacion y copia."""
 
+import json
 import os
 import shutil
 import sys
@@ -12,11 +13,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.comparer import Status, compare                       # noqa: E402
-from app.config import (DEFAULT_EXCLUDE, Profile, auto_workers,  # noqa: E402
-                        is_network_path)
+from app.config import (DEFAULT_EXCLUDE, DEFAULT_UPDATE_URL, AppConfig,  # noqa: E402
+                        Profile, auto_workers, is_network_path)
 from app.copier import CopyStats, run_copy                     # noqa: E402
 from app.rules import RuleSet                                  # noqa: E402
 from app.scanner import scan_both, scan_tree                   # noqa: E402
+from app.updater import _github_api_url                        # noqa: E402
 
 
 def write(root: Path, rel: str, text: str, mtime: float | None = None) -> Path:
@@ -271,6 +273,33 @@ class TestDefaultExclusions(unittest.TestCase):
         self.assertTrue(rules.dir_excluded("reorgs"))
         self.assertTrue(rules.dir_excluded("PrivateTempStorage"))
         self.assertFalse(rules.dir_excluded("datos/reorgs"))
+
+
+class TestDefaultUpdateChannel(unittest.TestCase):
+    """El canal viene puesto: una instalacion nueva se actualiza sin configurar."""
+
+    def _load(self, raw: dict) -> AppConfig:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            return AppConfig.load(path)
+
+    def test_a_fresh_config_points_at_the_repository(self):
+        self.assertEqual(AppConfig().update_url, DEFAULT_UPDATE_URL)
+
+    def test_an_old_config_without_the_key_gets_the_channel(self):
+        self.assertEqual(self._load({"profiles": []}).update_url, DEFAULT_UPDATE_URL)
+
+    def test_an_empty_url_saved_by_the_user_is_respected(self):
+        # Vaciar el campo es como se desactiva la busqueda; reponerlo en cada
+        # arranque seria ignorar esa decision.
+        self.assertEqual(self._load({"update_url": ""}).update_url, "")
+
+    def test_the_channel_resolves_to_the_releases_api(self):
+        self.assertEqual(
+            _github_api_url(DEFAULT_UPDATE_URL),
+            "https://api.github.com/repos/ComercializadoraS3/"
+            "update-my-folder-web/releases/latest")
 
 
 if __name__ == "__main__":

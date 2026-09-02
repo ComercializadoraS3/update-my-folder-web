@@ -79,6 +79,13 @@ def auto_workers(kind: str, *paths: str) -> int:
     return 32 if remote else min(16, cpu * 2)       # copia
 
 
+# Canal de actualizacion por defecto. Se deja escrito en el codigo para que una
+# instalacion nueva encuentre las versiones sin que nadie configure nada; el
+# usuario puede apuntar a otro repositorio o a un manifest.json propio desde
+# Configuracion -> Avanzado, y vaciarlo desactiva la busqueda.
+DEFAULT_UPDATE_URL = "https://github.com/ComercializadoraS3/update-my-folder-web"
+
+
 # Omisiones con las que nace todo perfil nuevo: codigo fuente, temporales y
 # archivos de estado que cada instalacion genera por su cuenta. Copiarlos de un
 # entorno a otro no aporta nada y en algunos casos (web.config, log.config)
@@ -136,7 +143,7 @@ class Profile:
 class AppConfig:
     profiles: list[Profile] = field(default_factory=lambda: [Profile()])
     active_profile: str = "Predeterminado"
-    update_url: str = ""
+    update_url: str = DEFAULT_UPDATE_URL
     auto_check_updates: bool = True
     appearance: str = "system"      # system | light | dark
     max_rows_display: int = 5000
@@ -183,7 +190,7 @@ class AppConfig:
         cfg = cls()
         cfg.profiles = [Profile.from_dict(p) for p in raw.get("profiles", [])] or [Profile()]
         cfg.active_profile = raw.get("active_profile", cfg.profiles[0].name)
-        cfg.update_url = raw.get("update_url", "")
+        cfg.update_url = raw.get("update_url", DEFAULT_UPDATE_URL)
         cfg.auto_check_updates = bool(raw.get("auto_check_updates", True))
         cfg.appearance = raw.get("appearance", "system")
         cfg.max_rows_display = int(raw.get("max_rows_display", 5000))

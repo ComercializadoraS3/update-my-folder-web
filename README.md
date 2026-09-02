@@ -100,13 +100,16 @@ lo que ya tengas escrito.
 
 ### Configurar el canal
 
-En **Configuración → Avanzado → URL de actualización**, la URL del repositorio:
+Viene puesto de fábrica (`DEFAULT_UPDATE_URL` en `app/config.py`), así que una
+instalación nueva busca actualizaciones sin que nadie toque nada:
 
 ```
-https://github.com/tu-organizacion/update-my-folder
+https://github.com/ComercializadoraS3/update-my-folder-web
 ```
 
-Se acepta también una URL de la API de GitHub o un `manifest.json` propio con
+Se cambia en **Configuración → Avanzado → URL de actualización**; dejarlo vacío
+desactiva la búsqueda. Se acepta también una URL de la API de GitHub o un
+`manifest.json` propio con
 los campos `version`, `url`, `sha256` y `notes`.
 
 ### Publicar automaticamente (lo normal)
