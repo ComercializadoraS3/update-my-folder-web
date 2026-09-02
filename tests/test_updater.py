@@ -75,14 +75,26 @@ class UpdaterCase(unittest.TestCase):
         # carpeta temporal y se finge estar empaquetado.
         self._orig_root = updater.install_root
         self._orig_frozen = updater.is_frozen
+        self._orig_version = updater.__version__
         updater.install_root = lambda: self.install
         updater.is_frozen = lambda: True
+        self.run_as("1.0.0")
 
     def tearDown(self):
         updater.install_root = self._orig_root
         updater.is_frozen = self._orig_frozen
+        updater.__version__ = self._orig_version
         self.server.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_as(self, version: str) -> None:
+        """Finge que el proceso corre desde esa version.
+
+        La limpieza nunca borra la carpeta en uso, asi que sin fijar el numero
+        estas pruebas dependerian del __version__ real y cambiarian de
+        resultado en cada publicacion.
+        """
+        updater.__version__ = version
 
     def publish(self, version: str, sha_ok: bool = True) -> str:
         package = self.published / f"UpdateMyFolder-{version}.zip"
@@ -206,9 +218,9 @@ class TestDownloadAndStage(UpdaterCase):
         y borrarla dejaria al usuario sin nada a lo que revertir."""
         for version in ("1.1.0", "1.2.0", "1.3.0", "1.4.0"):
             (self.install / "versions" / version).mkdir()
+        self.run_as("1.1.0")                    # sobraria por antiguedad
         activate("1.4.0")
-        running = updater.__version__
-        self.assertTrue((self.install / "versions" / running).exists())
+        self.assertTrue((self.install / "versions" / "1.1.0").exists())
 
 
 @unittest.skipUnless(os.name == "nt", "el lanzador es un .cmd de Windows")
