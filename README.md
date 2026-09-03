@@ -10,7 +10,7 @@ y se actualiza solo desde GitHub Releases.
 
 ### Instalación
 
-1. Descarga `UpdateMyFolder-<versión>-instalador.zip` del release.
+1. Descarga `UpdateMyFolder-instalador-<versión>.zip` del release.
 2. Descomprímelo donde quieras, por ejemplo `C:\Apps\UpdateMyFolder`.
 3. Crea un acceso directo a **`UpdateMyFolder.cmd`** y ábrelo siempre desde ahí.
 
@@ -149,7 +149,7 @@ Eso hace, en orden:
 1. escribe la versión nueva en `app/version.py`;
 2. compila con PyInstaller en modo carpeta;
 3. arma `UpdateMyFolder-1.1.0.zip` (actualización) y
-   `UpdateMyFolder-1.1.0-instalador.zip` (instalación nueva);
+   `UpdateMyFolder-instalador-1.1.0.zip` (instalación nueva);
 4. calcula el SHA-256 y escribe `manifest.json`;
 5. crea el release en GitHub y sube los archivos (necesita la CLI `gh`).
 

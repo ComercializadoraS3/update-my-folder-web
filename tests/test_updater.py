@@ -223,6 +223,114 @@ class TestDownloadAndStage(UpdaterCase):
         self.assertTrue((self.install / "versions" / "1.1.0").exists())
 
 
+class TestGitHubRelease(UpdaterCase):
+    """Seleccion de adjuntos en un release de GitHub.
+
+    Un release lleva dos zip (el paquete de actualizacion y el instalador) mas
+    el hash del paquete. Se llama a `_from_github` directamente contra el
+    servidor local: `fetch_latest` con una URL de github.com saldria a
+    internet de verdad.
+    """
+
+    def publish_release(self, version="1.1.0", installer_name=None,
+                        sha_asset=True, sha_list=False, notes_sha=False,
+                        notes="") -> tuple[str, str]:
+        """Escribe un JSON que imita la respuesta de la API. Devuelve (url, hash)."""
+        package = self.published / f"UpdateMyFolder-{version}.zip"
+        digest = make_package(package, version)
+        files = [package]
+
+        # Contenido distinto al del paquete: si se descarga el instalador por
+        # error, el hash publicado no cuadra y la prueba lo nota.
+        installer = self.published / (installer_name
+                                      or f"UpdateMyFolder-instalador-{version}.zip")
+        make_package(installer, f"{version} instalador")
+        files.append(installer)
+
+        if sha_asset:
+            own = self.published / f"{package.name}.sha256"
+            own.write_text(f"{digest}  {package.name}\n", encoding="utf-8")
+            files.append(own)
+        if sha_list:
+            # Una lista con varios archivos: hay que leer la linea correcta.
+            listing = self.published / "SHA256SUMS.txt"
+            listing.write_text(f"{'a' * 64}  {installer.name}\n"
+                               f"{digest}  {package.name}\n", encoding="utf-8")
+            files.append(listing)
+
+        body = {
+            "tag_name": f"v{version}",
+            "body": f"Version {version}\n\nsha256: {digest}\n" if notes_sha else notes,
+            # La API devuelve los adjuntos ordenados por nombre, no por orden
+            # de subida: es justo lo que hacia elegir el archivo equivocado.
+            "assets": [{"name": f.name,
+                        "size": f.stat().st_size,
+                        "browser_download_url": f"{self.server.base}/{f.name}"}
+                       for f in sorted(files, key=lambda f: f.name.lower())],
+        }
+        api = self.published / "release.json"
+        api.write_text(json.dumps(body), encoding="utf-8")
+        return f"{self.server.base}/{api.name}", digest
+
+    def test_downloads_the_update_package_not_the_installer(self):
+        api, digest = self.publish_release("1.1.0")
+        info = updater._from_github(api)
+        self.assertTrue(info.url.endswith("UpdateMyFolder-1.1.0.zip"))
+        self.assertEqual(info.sha256, digest)
+        # El hash se comprueba al descargar: si bajara el instalador, falla.
+        stage(download(info, self.tmp / "d.zip"), info.version)
+        self.assertTrue(
+            (self.install / "versions" / "1.1.0" / "UpdateMyFolder.exe").exists())
+
+    def test_installer_listed_first_is_ignored(self):
+        """Con el nombre antiguo el instalador ordena antes que el paquete."""
+        api, digest = self.publish_release(
+            "1.1.0", installer_name="UpdateMyFolder-1.1.0-instalador.zip")
+        info = updater._from_github(api)
+        self.assertTrue(info.url.endswith("UpdateMyFolder-1.1.0.zip"))
+        self.assertEqual(info.sha256, digest)
+        download(info, self.tmp / "d.zip")      # verifica el hash
+
+    def test_hash_read_from_a_list_of_sums(self):
+        api, digest = self.publish_release("1.1.0", sha_asset=False, sha_list=True)
+        self.assertEqual(updater._from_github(api).sha256, digest)
+
+    def test_hash_read_from_the_release_notes(self):
+        api, digest = self.publish_release("1.1.0", sha_asset=False, notes_sha=True)
+        self.assertEqual(updater._from_github(api).sha256, digest)
+
+    def test_release_without_any_hash_is_not_verified(self):
+        api, _ = self.publish_release("1.1.0", sha_asset=False,
+                                      notes="Version 1.1.0 sin hash")
+        self.assertFalse(updater._from_github(api).verified)
+
+    def test_hash_of_another_file_is_not_used(self):
+        """Mejor no verificar que verificar contra el hash de otro archivo."""
+        api, _ = self.publish_release("1.1.0", sha_asset=False)
+        sums = self.published / "UpdateMyFolder-instalador-1.1.0.zip.sha256"
+        sums.write_text(f"{'b' * 64}  {sums.name.removesuffix('.sha256')}\n",
+                        encoding="utf-8")
+        release = self.published / "release.json"
+        body = json.loads(release.read_text(encoding="utf-8"))
+        body["assets"].append({
+            "name": sums.name, "size": sums.stat().st_size,
+            "browser_download_url": f"{self.server.base}/{sums.name}"})
+        body["assets"].sort(key=lambda a: a["name"].lower())
+        release.write_text(json.dumps(body), encoding="utf-8")
+
+        info = updater._from_github(api)
+        self.assertTrue(info.url.endswith("UpdateMyFolder-1.1.0.zip"))
+        self.assertEqual(info.sha256, "")
+
+    def test_release_without_zip_raises(self):
+        body = {"tag_name": "v1.1.0", "body": "", "assets": [
+            {"name": "notas.txt", "size": 1,
+             "browser_download_url": f"{self.server.base}/notas.txt"}]}
+        (self.published / "release.json").write_text(json.dumps(body), encoding="utf-8")
+        with self.assertRaises(UpdateError):
+            updater._from_github(f"{self.server.base}/release.json")
+
+
 @unittest.skipUnless(os.name == "nt", "el lanzador es un .cmd de Windows")
 class TestLauncher(unittest.TestCase):
     """El lanzador decide que version arranca; conviene probar esa eleccion."""

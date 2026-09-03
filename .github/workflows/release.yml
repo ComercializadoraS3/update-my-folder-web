@@ -101,7 +101,7 @@ jobs:
           gh release create "v$env:VERSION" `
             "dist/UpdateMyFolder-$env:VERSION.zip" `
             "dist/UpdateMyFolder-$env:VERSION.zip.sha256" `
-            "dist/UpdateMyFolder-$env:VERSION-instalador.zip" `
+            "dist/UpdateMyFolder-instalador-$env:VERSION.zip" `
             "dist/manifest.json" `
             --title "v$env:VERSION" `
             --notes-file notas.txt `

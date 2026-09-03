@@ -40,6 +40,7 @@ USER_AGENT = f"{APP_NAME}/{__version__}"
 TIMEOUT = 15
 KEEP_VERSIONS = 3
 _SHA_IN_TEXT = re.compile(r"\b([a-fA-F0-9]{64})\b")
+_INSTALLER_MARKS = ("instalador", "installer", "setup")
 
 
 @dataclass
@@ -80,6 +81,76 @@ def _github_api_url(url: str) -> str | None:
     return None
 
 
+def _pick_package(assets: list[dict], version: str) -> dict:
+    """Elige el zip de actualizacion entre los adjuntos del release.
+
+    Un release lleva dos zip: el paquete de actualizacion y el instalador
+    completo para una maquina nueva. La API de GitHub devuelve los adjuntos
+    ordenados por nombre, no por orden de subida, y "-instalador.zip" queda
+    antes que ".zip", asi que quedarse con el primer .zip descargaba el
+    instalador mientras el hash publicado era el del paquete: la verificacion
+    fallaba siempre. Se elige por nombre, no por posicion.
+    """
+    zips = [a for a in assets if a["name"].lower().endswith(".zip")]
+    if not zips:
+        raise UpdateError("El release no incluye ningun archivo .zip")
+    expected = f"{APP_NAME}-{version.lstrip('vV')}.zip".lower()
+    exact = next((a for a in zips if a["name"].lower() == expected), None)
+    if exact is not None:
+        return exact
+    # Un release con otros nombres: se descartan los que se anuncian como
+    # instalador antes de tomar el primero que quede.
+    plain = [a for a in zips
+             if not any(mark in a["name"].lower() for mark in _INSTALLER_MARKS)]
+    return (plain or zips)[0]
+
+
+def _sha_named(text: str, package: str, lone_ok: bool = False) -> str:
+    """Busca en `text` el SHA-256 que corresponde a `package`.
+
+    El formato de sha256sum es "<hash>  <archivo>" por linea. Un hash sin
+    nombre de archivo solo se acepta con `lone_ok`, y solo si es el unico del
+    texto: es el caso de las notas de un release, donde el hash va suelto.
+    """
+    lines = [line for line in text.splitlines() if _SHA_IN_TEXT.search(line)]
+    for line in lines:
+        if package.lower() in line.lower():
+            return _SHA_IN_TEXT.search(line).group(1).lower()
+    if lone_ok and len(lines) == 1 and ".zip" not in lines[0].lower():
+        return _SHA_IN_TEXT.search(lines[0]).group(1).lower()
+    return ""
+
+
+def _published_sha(assets: list[dict], package: str, notes: str) -> str:
+    """Hash publicado del paquete elegido, o cadena vacia si no hay ninguno.
+
+    Un hash cualquiera del release no sirve: tiene que ser el del archivo que
+    se va a descargar. Se busca primero su propio .sha256, luego una lista de
+    sumas en la que alguna linea lo nombre, y al final las notas del release.
+    """
+    def text_of(asset: dict) -> str:
+        try:
+            return _get(asset["browser_download_url"],
+                        "text/plain").decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError):
+            return ""
+
+    own = next((a for a in assets
+                if a["name"].lower() == f"{package}.sha256".lower()), None)
+    if own is not None:
+        sha = _sha_named(text_of(own), package, lone_ok=True)
+        if sha:
+            return sha
+
+    for asset in assets:
+        if asset["name"].lower().endswith((".sha256", "sha256sums.txt")):
+            sha = _sha_named(text_of(asset), package)
+            if sha:
+                return sha
+
+    return _sha_named(notes, package, lone_ok=True)
+
+
 def _from_github(api_url: str) -> ReleaseInfo:
     data = json.loads(_get(api_url))
     if isinstance(data, list):                  # .../releases devuelve una lista
@@ -88,34 +159,16 @@ def _from_github(api_url: str) -> ReleaseInfo:
             raise UpdateError("El repositorio no tiene releases publicados")
 
     assets = data.get("assets", [])
-    zip_asset = next((a for a in assets if a["name"].lower().endswith(".zip")), None)
-    if zip_asset is None:
-        raise UpdateError("El release no incluye ningun archivo .zip")
-
+    version = str(data.get("tag_name") or data.get("name") or "0.0.0")
     notes = (data.get("body") or "").strip()
-    sha = ""
-
-    # El hash puede venir como archivo adjunto o escrito en las notas.
-    sha_asset = next(
-        (a for a in assets
-         if a["name"].lower().endswith((".sha256", "sha256sums.txt"))), None)
-    if sha_asset is not None:
-        try:
-            text = _get(sha_asset["browser_download_url"], "text/plain").decode("utf-8", "replace")
-            found = _SHA_IN_TEXT.search(text)
-            sha = found.group(1).lower() if found else ""
-        except (urllib.error.URLError, OSError):
-            sha = ""
-    if not sha:
-        found = _SHA_IN_TEXT.search(notes)
-        sha = found.group(1).lower() if found else ""
+    package = _pick_package(assets, version)
 
     return ReleaseInfo(
-        version=str(data.get("tag_name") or data.get("name") or "0.0.0"),
-        url=zip_asset["browser_download_url"],
+        version=version,
+        url=package["browser_download_url"],
         notes=notes,
-        sha256=sha,
-        size=int(zip_asset.get("size") or 0),
+        sha256=_published_sha(assets, package["name"], notes),
+        size=int(package.get("size") or 0),
     )
 
 

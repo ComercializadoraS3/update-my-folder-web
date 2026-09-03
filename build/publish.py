@@ -12,7 +12,7 @@ de GitHub Actions en cada push a main.
   2. compila con PyInstaller (onedir)
   3. arma dos zip:
        UpdateMyFolder-<ver>.zip              paquete de actualizacion
-       UpdateMyFolder-<ver>-instalador.zip   instalacion completa la primera vez
+       UpdateMyFolder-instalador-<ver>.zip   instalacion completa la primera vez
   4. calcula el SHA-256 y escribe manifest.json
   5. con --release, crea el release en GitHub y sube los archivos (usa 'gh')
 
@@ -160,7 +160,13 @@ def make_installer(app_dir: Path, version: str) -> Path:
         "permite que la aplicacion se actualice sola sin romper el acceso directo.\n",
         encoding="utf-8")
 
-    target = DIST / f"{APP_NAME}-{version}-instalador.zip"
+    # El nombre lleva 'instalador' antes del numero, no despues, y eso importa:
+    # la API de GitHub devuelve los adjuntos ordenados por nombre, y las
+    # versiones instaladas hasta la 1.2.1 se quedan con el primer .zip del
+    # release. Con '-instalador' al final ese primero era el instalador, cuyo
+    # hash no coincide con el publicado, y esas instalaciones no podian
+    # actualizarse. Asi el paquete de actualizacion ordena primero.
+    target = DIST / f"{APP_NAME}-instalador-{version}.zip"
     zip_tree(staging, target)
     shutil.rmtree(staging, ignore_errors=True)
     return target
