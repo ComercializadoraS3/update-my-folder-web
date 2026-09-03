@@ -126,7 +126,7 @@ class Profile:
     verify_content: bool = False
     dry_run: bool = False
     mirror_delete: bool = False
-    threads: int = 0            # 0 = automatico
+    threads: int = 32            # 0 = automatico
     mtime_tolerance: float = 2.0
 
     def workers_for(self, kind: str) -> int:
