@@ -7,7 +7,7 @@ nombrar el zip, y la barra de titulo.
 
 APP_NAME = "UpdateMyFolder"
 APP_TITLE = "Update My Folder"
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 
 def parse_version(text: str) -> tuple[int, ...]:
