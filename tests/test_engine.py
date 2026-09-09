@@ -3,15 +3,18 @@
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import copier                                         # noqa: E402
 from app.comparer import Status, compare                       # noqa: E402
 from app.config import (DEFAULT_EXCLUDE, DEFAULT_UPDATE_URL, AppConfig,  # noqa: E402
                         Profile, auto_workers, is_network_path)
@@ -56,6 +59,19 @@ class TestScanner(EngineCase):
         result = scan_tree(str(self.src), workers=4)
         self.assertEqual(set(result.entries), {"a.txt", "sub/b.txt", "sub/deep/c.txt"})
         self.assertEqual(result.errors, [])
+
+    def test_copier_temporary_files_are_ignored(self):
+        """Un hilo abandonado puede dejar su temporal en el destino. Sin este
+        filtro apareceria como sobrante y, con el borrado en espejo activo,
+        la lista de lo que se va a eliminar se llenaria de ruido."""
+        write(self.src, "a.txt", "x")
+        (self.src / "a.txt.umf-tmp-a3f9c1de").write_text("a medias", encoding="utf-8")
+        (self.src / "b.txt.umf-tmp").write_text("de una version anterior", encoding="utf-8")
+        # Un archivo del usuario que solo se le parece si tiene que salir.
+        (self.src / "notas.umf-tmp-plantilla.txt").write_text("mio", encoding="utf-8")
+
+        result = scan_tree(str(self.src), workers=4)
+        self.assertEqual(set(result.entries), {"a.txt", "notas.umf-tmp-plantilla.txt"})
 
     def test_excluded_folder_is_pruned(self):
         write(self.src, "keep/a.cs", "x")
@@ -142,16 +158,114 @@ class TestCopier(EngineCase):
         self.assertEqual(dest.read_text(encoding="utf-8"), "hola")
         self.assertAlmostEqual(dest.stat().st_mtime, past, delta=2)
 
+    def test_mtime_is_preserved_exactly(self):
+        """La fecha se fija sobre el descriptor abierto en vez de reabrir el
+        archivo. Con tolerancia de segundos el cambio pasaria inadvertido, asi
+        que se compara al nanosegundo."""
+        past = time.time() - 20_000
+        origen = write(self.src, "a.bin", "contenido", mtime=past)
+        run_copy(self.sync().items, str(self.src), str(self.dst), workers=2)
+
+        destino = self.dst / "a.bin"
+        # Windows guarda las fechas en unidades de 100 ns; se compara con esa
+        # granularidad, no con la del reloj de Python.
+        self.assertLessEqual(
+            abs(destino.stat().st_mtime_ns - origen.stat().st_mtime_ns), 100)
+
+    def test_large_file_is_copied_whole(self):
+        """Con `buffering=0` una escritura puede quedarse corta sin fallar.
+        Un archivo de varios bloques lo destapa: si se ignora el valor que
+        devuelve `write`, el destino queda truncado con la fecha correcta y
+        la siguiente sincronizacion lo da por bueno."""
+        payload = os.urandom(5 << 20)           # 5 MiB: mas de un bloque
+        (self.src / "grande.bin").write_bytes(payload)
+        report = run_copy(self.sync().items, str(self.src), str(self.dst), workers=2)
+
+        self.assertEqual(report.errors, [])
+        self.assertEqual((self.dst / "grande.bin").read_bytes(), payload)
+
+    def test_readonly_destination_is_overwritten(self):
+        """El destino de solo lectura ya no se sondea antes de cada copia:
+        se resuelve cuando `os.replace` falla."""
+        write(self.src, "a.txt", "nuevo", mtime=time.time())
+        destino = write(self.dst, "a.txt", "viejo", mtime=time.time() - 9000)
+        os.chmod(destino, stat.S_IREAD)
+        try:
+            report = run_copy(self.sync().items, str(self.src), str(self.dst), workers=1)
+        finally:
+            os.chmod(destino, stat.S_IWRITE)
+
+        self.assertEqual(report.errors, [])
+        self.assertEqual(destino.read_text(encoding="utf-8"), "nuevo")
+
     def test_second_run_copies_nothing(self):
         for n in range(20):
             write(self.src, f"dir{n % 4}/f{n}.txt", f"contenido {n}")
         run_copy(self.sync().items, str(self.src), str(self.dst), workers=8)
         self.assertEqual(len(self.sync().pending), 0)
 
+    def test_cancel_does_not_wait_for_a_stuck_file(self):
+        """Una escritura contra un recurso de red caido no se puede
+        interrumpir desde Python. Lo que si se puede es dejar de esperarla:
+        antes, "Cancelar" quedaba a merced del tiempo de espera del protocolo
+        y el programa parecia colgado."""
+        for n in range(30):
+            write(self.src, f"f{n}.txt", "contenido")
+        items = self.sync().items
+        release, entered, cancel = threading.Event(), threading.Event(), threading.Event()
+
+        def stuck(*_args, **_kwargs):
+            entered.set()
+            release.wait(30)
+            return True, ""
+
+        before = set(threading.enumerate())
+        try:
+            with mock.patch.object(copier, "_copy_one", stuck):
+                threading.Thread(target=lambda: (entered.wait(5), cancel.set()),
+                                 daemon=True).start()
+                started = time.monotonic()
+                report = run_copy(items, str(self.src), str(self.dst),
+                                  workers=2, cancel=cancel)
+                elapsed = time.monotonic() - started
+
+            self.assertTrue(report.cancelled)
+            self.assertLess(elapsed, 10.0,
+                            "run_copy se quedo esperando al hilo atascado")
+            lingering = [t.name for t in threading.enumerate()
+                         if t not in before and not t.daemon]
+            self.assertEqual(lingering, [],
+                             "queda un hilo no demonio: impediria cerrar el programa")
+        finally:
+            release.set()
+
+    def test_a_late_worker_does_not_publish_its_file(self):
+        """El hilo abandonado termina su escritura mas tarde. Para entonces la
+        copia ya se reporto cancelada, asi que no debe dejar el archivo
+        puesto en el destino."""
+        write(self.src, "a.txt", "contenido")
+        items = self.sync().items
+        cancel = threading.Event()
+        real_set_times = copier._set_times
+
+        def cae_la_red(fileno, st):
+            real_set_times(fileno, st)
+            cancel.set()            # justo entre escribir y publicar
+
+        with mock.patch.object(copier, "_set_times", cae_la_red):
+            report = run_copy(items, str(self.src), str(self.dst),
+                              workers=1, cancel=cancel)
+
+        self.assertTrue(report.cancelled)
+        self.assertFalse((self.dst / "a.txt").exists())
+        self.assertEqual([p.name for p in self.dst.rglob("*.umf-tmp*")], [])
+
     def test_no_temporary_files_left_behind(self):
         write(self.src, "a.bin", "x" * 5000)
         run_copy(self.sync().items, str(self.src), str(self.dst), workers=2)
-        leftovers = [p.name for p in self.dst.rglob("*.umf-tmp")]
+        # El sufijo lleva un identificador propio de cada corrida, de ahi el
+        # comodin final.
+        leftovers = [p.name for p in self.dst.rglob("*.umf-tmp*")]
         self.assertEqual(leftovers, [])
 
     def test_dry_run_writes_nothing(self):

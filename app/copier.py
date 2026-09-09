@@ -4,27 +4,45 @@ Cada archivo se escribe primero en un temporal junto al destino y solo al
 terminar se mueve con `os.replace`, que en NTFS es atomico. Si se cancela la
 operacion o se cae la red, el destino conserva la version anterior completa:
 nunca queda un archivo a medio escribir.
+
+Los hilos vienen de `app.pool`, no de ThreadPoolExecutor: una escritura contra
+un recurso de red que dejo de responder no se puede interrumpir desde Python,
+asi que la unica salida es dejar de esperarla. El temporal lleva un
+identificador propio de cada corrida para que un hilo abandonado no se cruce
+con la copia siguiente.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
+import secrets
 import stat
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from .comparer import Item, Status
 from .logging_setup import get as get_logger
+from .pool import Pool
 from .scanner import to_os_path
 
 log = get_logger("copier")
 
 CHUNK = 1 << 20             # 1 MiB
-TMP_SUFFIX = ".umf-tmp"
+TMP_PREFIX = ".umf-tmp"
 RETRIES = 3
+
+
+def _tmp_suffix() -> str:
+    """Sufijo distinto en cada corrida.
+
+    Un hilo abandonado puede seguir escribiendo su temporal despues de que la
+    copia se dio por cancelada. Con un nombre fijo, la corrida siguiente
+    escribiria el mismo archivo desde otro hilo y las dos se pisarian. Con uno
+    propio por corrida, lo peor que queda es un temporal huerfano, y el
+    recorrido ya no los mira.
+    """
+    return f"{TMP_PREFIX}-{secrets.token_hex(4)}"
 
 
 @dataclass
@@ -41,15 +59,22 @@ class CopyStats:
     deleted: int = 0
     failed: int = 0
     started: float = field(default_factory=time.monotonic)
+    # Cuando avanzo por ultima vez. La interfaz lo mira para distinguir "va
+    # lento" de "el destino dejo de responder": sin esto la barra se queda
+    # quieta y el programa parece colgado.
+    last_progress: float = field(default_factory=time.monotonic)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add_bytes(self, n: int) -> None:
         with self._lock:
             self.bytes_done += n
+            if n > 0:               # los negativos son reintentos, no avance
+                self.last_progress = time.monotonic()
 
     def finish_file(self, ok: bool) -> None:
         with self._lock:
             self.files_done += 1
+            self.last_progress = time.monotonic()
             if not ok:
                 self.failed += 1
 
@@ -64,6 +89,11 @@ class CopyStats:
     @property
     def rate(self) -> float:
         return self.bytes_done / self.elapsed
+
+    @property
+    def stalled_for(self) -> float:
+        """Segundos sin avanzar un solo byte."""
+        return time.monotonic() - self.last_progress
 
     @property
     def eta(self) -> float:
@@ -104,11 +134,57 @@ def _clear_readonly(path: str) -> None:
         pass
 
 
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    _SetFileTime = ctypes.WinDLL("kernel32", use_last_error=True).SetFileTime
+    _SetFileTime.argtypes = [wintypes.HANDLE,
+                             ctypes.POINTER(wintypes.FILETIME),
+                             ctypes.POINTER(wintypes.FILETIME),
+                             ctypes.POINTER(wintypes.FILETIME)]
+    _SetFileTime.restype = wintypes.BOOL
+    _EPOCH_DELTA = 116444736000000000   # 1601-01-01 -> 1970-01-01, en unidades de 100 ns
+
+    def _filetime(ns: int) -> "wintypes.FILETIME":
+        value = ns // 100 + _EPOCH_DELTA
+        return wintypes.FILETIME(value & 0xFFFFFFFF, value >> 32)
+
+    def _set_times(fileno: int, st: os.stat_result) -> None:
+        atime, mtime = _filetime(st.st_atime_ns), _filetime(st.st_mtime_ns)
+        if not _SetFileTime(msvcrt.get_osfhandle(fileno), None,
+                            ctypes.byref(atime), ctypes.byref(mtime)):
+            # Se propaga igual que lo hacia shutil.copystat: un destino sin la
+            # fecha del origen se volveria a copiar en cada sincronizacion.
+            raise ctypes.WinError(ctypes.get_last_error())
+else:
+    def _set_times(fileno: int, st: os.stat_result) -> None:
+        os.utime(fileno, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def _write_all(fout, block: bytes) -> None:
+    """Escribe el bloque entero.
+
+    `buffering=0` entrega un archivo en crudo, y ahi `write` puede escribir
+    menos bytes de los pedidos sin que sea un error. Ignorar el valor devuelto
+    dejaba archivos truncados en el destino con la fecha correcta: la siguiente
+    sincronizacion los daba por buenos y nunca los reparaba.
+    """
+    view = memoryview(block)
+    while view:
+        written = fout.write(view)
+        if not written:
+            raise OSError("la escritura no avanzo")
+        view = view[written:]
+
+
 def _copy_one(item: Item, src_root: str, dst_root: str, dirs: _DirCache,
-              stats: CopyStats, cancel: threading.Event) -> tuple[bool, str]:
+              stats: CopyStats, cancel: threading.Event,
+              suffix: str) -> tuple[bool, str]:
     src = to_os_path(src_root, item.rel)
     dst = to_os_path(dst_root, item.rel)
-    tmp = dst + TMP_SUFFIX
+    tmp = dst + suffix
     last_error = ""
 
     for attempt in range(RETRIES):
@@ -117,6 +193,7 @@ def _copy_one(item: Item, src_root: str, dst_root: str, dirs: _DirCache,
         written = 0
         try:
             dirs.ensure(os.path.dirname(dst))
+            src_stat = os.stat(src)
             with open(src, "rb", buffering=0) as fin, open(tmp, "wb", buffering=0) as fout:
                 while True:
                     if cancel.is_set():
@@ -124,14 +201,27 @@ def _copy_one(item: Item, src_root: str, dst_root: str, dirs: _DirCache,
                     block = fin.read(CHUNK)
                     if not block:
                         break
-                    fout.write(block)
+                    _write_all(fout, block)
                     written += len(block)
                     stats.add_bytes(len(block))
-            shutil.copystat(src, tmp)       # conservar la fecha: la proxima
-                                            # sincronizacion depende de ella
-            if os.path.exists(dst):
+                # Conservar la fecha: la proxima sincronizacion depende de ella.
+                # Se fija sobre el descriptor todavia abierto en vez de con
+                # shutil.copystat, que reabre el archivo: medido contra un
+                # recurso SMB, esa reapertura costaba unos 12 ms por archivo y
+                # no mejoraba con mas hilos, mas que la escritura en si.
+                _set_times(fout.fileno(), src_stat)
+            if cancel.is_set():
+                # Ultima parada antes de publicar. Un hilo que se abandono y
+                # termino tarde su escritura no debe dejar el archivo puesto
+                # cuando la copia ya se reporto como cancelada.
+                raise InterruptedError
+            try:
+                os.replace(tmp, dst)
+            except PermissionError:
+                # Solo aqui se paga el sondeo del destino: comprobar de
+                # antemano si existe era otra ida y vuelta por cada archivo.
                 _clear_readonly(dst)
-            os.replace(tmp, dst)
+                os.replace(tmp, dst)
             return True, ""
         except InterruptedError:
             stats.add_bytes(-written)
@@ -202,14 +292,16 @@ def run_copy(
         return report
 
     dirs = _DirCache()
-    with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="copy") as pool:
-        futures = {pool.submit(_copy_one, i, src_root, dst_root, dirs, stats, cancel): i
-                   for i in to_copy}
-        # as_completed reporta en cuanto cada archivo termina, no en el orden
-        # en que se enviaron: el progreso avanza de forma pareja.
-        for future in as_completed(futures):
-            item = futures[future]
-            ok, message = future.result()
+    suffix = _tmp_suffix()
+
+    def copy_one(item: Item) -> tuple[bool, str]:
+        return _copy_one(item, src_root, dst_root, dirs, stats, cancel, suffix)
+
+    # El grupo entrega cada archivo en cuanto termina, no en el orden en que
+    # se envio: el progreso avanza de forma pareja. Y al cancelar no se queda
+    # esperando a un hilo detenido en el destino: lo abandona.
+    with Pool(max(1, workers), "copy", cancel) as pool:
+        for item, (ok, message) in pool.map_unordered(copy_one, to_copy):
             stats.finish_file(ok)
             if ok:
                 report.copied += 1
@@ -221,6 +313,12 @@ def run_copy(
                 log.warning("fallo al copiar %s: %s", item.rel, message)
             if on_item:
                 on_item(item, ok, message)
+            if cancel.is_set():
+                # Sin esto habria que recorrer las miles de tareas que quedan
+                # en cola solo para verlas devolver "cancelado", y cada una
+                # manda su aviso a la interfaz: cancelar tardaba mas que copiar.
+                pool.abandon()
+                break
 
     if cancel.is_set():
         report.cancelled = True
