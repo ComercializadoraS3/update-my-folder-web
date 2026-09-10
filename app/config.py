@@ -153,6 +153,9 @@ class AppConfig:
     auto_check_updates: bool = True
     appearance: str = "system"      # system | light | dark
     max_rows_display: int = 5000
+    # Solo el tamano ("1120x740"), no la posicion: la ventana arranca siempre
+    # centrada. Las versiones anteriores guardaban aqui la geometria completa;
+    # la ventana descarta esa parte al leerla.
     window_geometry: str = ""
 
     # ---------------------------------------------------------------- perfiles
