@@ -32,6 +32,10 @@ from .theme import apply_treeview_style, configure_row_tags
 
 PUMP_MS = 100
 CHUNK_ROWS = 400        # filas insertadas por tanda para no bloquear el dibujado
+# Segundos sin copiar un solo byte a partir de los cuales se avisa. Con
+# bloques de 1 MiB y varios hilos, unos pocos segundos en blanco ya no son
+# lentitud: es el destino que dejo de contestar.
+STALL_SECONDS = 10
 
 log = get_logger("ui")
 
@@ -427,6 +431,7 @@ class MainWindow(ctk.CTk):
 
     def request_cancel(self) -> None:
         self.cancel.set()
+        self.cancel_button.configure(state="disabled")
         self.status.configure(text="Cancelando...")
 
     def _pump(self) -> None:
@@ -618,6 +623,14 @@ class MainWindow(ctk.CTk):
             return
         self.progress.set(min(1.0, s.bytes_done / s.bytes_total) if s.bytes_total
                           else s.files_done / s.files_total)
+        stalled = s.stalled_for
+        if stalled > STALL_SECONDS:
+            # Antes la barra simplemente se quedaba quieta y no habia forma de
+            # distinguirlo de un cuelgue del programa.
+            self.progress_label.configure(
+                text=f"{s.files_done:,}/{s.files_total:,}  ·  el destino no responde "
+                     f"desde hace {format_duration(stalled)}")
+            return
         self.progress_label.configure(
             text=f"{s.files_done:,}/{s.files_total:,}  ·  "
                  f"{format_size(s.rate)}/s  ·  faltan {format_duration(s.eta)}")

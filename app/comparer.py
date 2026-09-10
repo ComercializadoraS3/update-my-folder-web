@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 
 from .logging_setup import get as get_logger
+from .pool import Pool
 from .scanner import Entry, ScanResult, to_os_path
 
 log = get_logger("comparer")
@@ -137,8 +137,8 @@ def compare(
                                   to_os_path(dst_root, item.rel))
             return item, equal
 
-        with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="verify") as pool:
-            for item, equal in pool.map(check, to_verify):
+        with Pool(max(1, workers), "verify", cancel) as pool:
+            for _bundle, (item, equal) in pool.map_unordered(check, to_verify):
                 done += 1
                 if equal:
                     same += 1
@@ -146,6 +146,9 @@ def compare(
                     items.append(item)
                 if on_progress and done % 25 == 0:
                     on_progress(done, total)
+                if cancel.is_set():
+                    pool.abandon()
+                    break
         if on_progress:
             on_progress(total, total)
 

@@ -7,9 +7,11 @@ Dos decisiones sostienen el rendimiento de todo el programa:
    salen sin una sola llamada al sistema adicional. En arboles grandes esa
    sola diferencia vale segundos frente a decenas de segundos.
 
-2. Recorrido por niveles sobre un ThreadPoolExecutor. El trabajo es de E/S y
+2. Recorrido por niveles sobre un grupo de hilos. El trabajo es de E/S y
    libera el GIL en cada llamada al sistema, asi que los hilos si escalan,
-   sobre todo contra rutas de red donde manda la latencia.
+   sobre todo contra rutas de red donde manda la latencia. El grupo es de
+   `app.pool`, abandonable: un recurso de red que deja de responder a mitad
+   del recorrido no puede impedir que el programa termine.
 
 Las carpetas excluidas se podan antes de descender: nunca se listan.
 """
@@ -17,15 +19,23 @@ Las carpetas excluidas se podan antes de descender: nunca se listan.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .logging_setup import get as get_logger
+from .pool import Pool
 from .rules import RuleSet
 
 log = get_logger("scanner")
+
+# Temporales del copiador: "<nombre>.umf-tmp-a3f9c1de", y sin el identificador
+# en los que dejaron las versiones anteriores. Se describe aqui en vez de
+# importarlo de app.copier: el copiador ya importa este modulo y hacerlo al
+# reves cerraria el circulo. El patron es estricto a proposito, para no tapar
+# un archivo del usuario que resulte llamarse parecido.
+TMP_NAME = re.compile(r"\.umf-tmp(-[0-9a-f]{8})?$")
 
 
 @dataclass(slots=True)
@@ -70,6 +80,10 @@ def _list_dir(root: str, reldir: str, rules: RuleSet | None, dir_included: bool)
                         else:
                             subdirs.append((rel, True))
                     elif de.is_file(follow_symlinks=False):
+                        if TMP_NAME.search(de.name):
+                            # Temporal de una copia en curso o abandonada: no
+                            # es parte del arbol y no debe salir como sobrante.
+                            continue
                         rel = f"{reldir}/{de.name}" if reldir else de.name
                         if rules is not None:
                             if rules.file_excluded(rel, de.name):
@@ -111,12 +125,13 @@ def scan_tree(
     cancel = cancel or threading.Event()
     level: list[tuple[str, bool]] = [("", not (rules and rules.has_includes))]
 
-    with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="scan") as pool:
+    def list_one(item: tuple[str, bool]):
+        return _list_dir(root, item[0], rules, item[1])
+
+    with Pool(max(1, workers), "scan", cancel) as pool:
         while level and not cancel.is_set():
             next_level: list[tuple[str, bool]] = []
-            for files, subdirs, error in pool.map(
-                lambda item: _list_dir(root, item[0], rules, item[1]), level
-            ):
+            for _item, (files, subdirs, error) in pool.map_unordered(list_one, level):
                 if error:
                     result.errors.append(error)
                 for entry in files:
@@ -126,6 +141,8 @@ def scan_tree(
             level = next_level
             if on_progress:
                 on_progress(len(result.entries), result.dir_count)
+            if cancel.is_set():
+                pool.abandon()
 
     log.debug("recorrido %s: %d archivos, %d carpetas, %d hilos, %.0f ms",
               root, len(result.entries), result.dir_count, workers,
@@ -163,7 +180,18 @@ def scan_both(
         return _cb
 
     half = max(2, workers // 2)
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="scan-root") as pool:
-        f_src = pool.submit(scan_tree, src_root, rules, cancel, half, report("src"), False)
-        f_dst = pool.submit(scan_tree, dst_root, rules, cancel, half, report("dst"), True)
-        return f_src.result(), f_dst.result()
+    jobs = [("src", src_root, False), ("dst", dst_root, True)]
+
+    def scan_one(job):
+        which, root, missing_ok = job
+        return scan_tree(root, rules, cancel, half, report(which), missing_ok)
+
+    done: dict[str, ScanResult] = {}
+    with Pool(2, "scan-root", cancel) as pool:
+        for job, result in pool.map_unordered(scan_one, jobs):
+            done[job[0]] = result
+
+    # Un lado puede faltar si se cancelo o si se abandono el hilo. Quien llama
+    # comprueba `cancel` antes de comparar, asi que ese resultado vacio no se
+    # llega a usar como si el arbol estuviera de verdad vacio.
+    return done.get("src", ScanResult()), done.get("dst", ScanResult())
