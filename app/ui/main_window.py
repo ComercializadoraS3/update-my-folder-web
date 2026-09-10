@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime
 import os
 import queue
+import re
 import subprocess
 import threading
 import tkinter as tk
@@ -36,6 +37,57 @@ CHUNK_ROWS = 400        # filas insertadas por tanda para no bloquear el dibujad
 # bloques de 1 MiB y varios hilos, unos pocos segundos en blanco ya no son
 # lentitud: es el destino que dejo de contestar.
 STALL_SECONDS = 10
+
+MIN_SIZE = (940, 600)
+DEFAULT_SIZE = (1120, 740)
+# Solo "1120x740". Deliberadamente estricto: las versiones anteriores
+# guardaban aqui la geometria completa, posicion incluida, y de aquellas no
+# hay forma de saber si la ventana estaba maximizada. Un valor con posicion
+# se descarta entero y se arranca con el tamano de fabrica.
+_SIZE_ONLY = re.compile(r"^(\d+)x(\d+)$")
+
+
+def _work_area(window) -> tuple[int, int, int, int]:
+    """Area util de la pantalla principal, en pixeles fisicos.
+
+    Es la pantalla menos la barra de tareas. Centrar contra la pantalla
+    entera deja la ventana visiblemente baja, porque la mitad de la barra
+    de tareas se cuenta como espacio libre que no lo es.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            rect = wintypes.RECT()
+            SPI_GETWORKAREA = 0x0030
+            if ctypes.windll.user32.SystemParametersInfoW(
+                    SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+                return (rect.left, rect.top,
+                        rect.right - rect.left, rect.bottom - rect.top)
+        except Exception:                                   # noqa: BLE001
+            pass
+    return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
+
+
+def startup_size(saved: str, scale: float, area_w: int, area_h: int) -> tuple[int, int]:
+    """Tamano con el que abrir la ventana, en unidades logicas.
+
+    `scale` es el factor de DPI que CustomTkinter aplica a lo que se le pide:
+    1120 de ancho son 1680 pixeles reales al 150%. El area util viene en
+    pixeles reales, asi que la comparacion se hace ahi.
+
+    Se descarta lo guardado si ya no cabe en la pantalla de ahora, que puede
+    no ser la de la ultima vez.
+    """
+    match = _SIZE_ONLY.match(saved or "")
+    if not match:
+        return DEFAULT_SIZE
+    width = max(MIN_SIZE[0], int(match.group(1)))
+    height = max(MIN_SIZE[1], int(match.group(2)))
+    if width * scale > area_w or height * scale > area_h:
+        return DEFAULT_SIZE
+    return width, height
 
 log = get_logger("ui")
 
@@ -63,14 +115,8 @@ class MainWindow(ctk.CTk):
         self._insert_job: str | None = None
 
         self.title(f"{APP_TITLE}  ·  v{__version__}")
-        self.minsize(940, 600)
-        if self.cfg.window_geometry:
-            try:
-                self.geometry(self.cfg.window_geometry)
-            except tk.TclError:
-                self.geometry("1120x740")
-        else:
-            self.geometry("1120x740")
+        self.minsize(*MIN_SIZE)
+        self._place_window()
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(5, weight=1)
@@ -88,6 +134,37 @@ class MainWindow(ctk.CTk):
         self.after(PUMP_MS, self._pump)
         if self.cfg.auto_check_updates and self.cfg.update_url.strip():
             self.after(1200, lambda: self.check_updates(silent=True))
+
+    # ------------------------------------------------------------------ ventana
+
+    def _place_window(self) -> None:
+        """Da tamano a la ventana y la centra en la pantalla principal.
+
+        Se recuerda el tamano entre sesiones, pero no la posicion: la ventana
+        arranca siempre centrada. El tamano se acepta solo si sigue cabiendo
+        en la pantalla de ahora, que puede no ser la de la ultima vez.
+        """
+        left, top, area_w, area_h = _work_area(self)
+        scale = ctk.ScalingTracker.get_window_scaling(self)
+        width, height = startup_size(self.cfg.window_geometry, scale, area_w, area_h)
+        self.geometry(f"{width}x{height}")
+
+        real_w, real_h = round(width * scale), round(height * scale)
+        # La posicion va por wm_geometry, sin pasar por CustomTkinter: estas
+        # coordenadas ya son pixeles reales y volveria a escalarlas.
+        self.wm_geometry(f"+{left + max(0, (area_w - real_w) // 2)}"
+                         f"+{top + max(0, (area_h - real_h) // 2)}")
+
+    def _remember_size(self) -> None:
+        """Guarda el tamano, nunca la posicion, y nunca el de una maximizada.
+
+        Con la ventana maximizada `geometry()` devuelve la pantalla completa:
+        guardarlo hacia que la sesion siguiente abriera igual de grande sin
+        haberlo pedido.
+        """
+        if self.state() != "normal":
+            return
+        self.cfg.window_geometry = self.geometry().split("+")[0]
 
     # ------------------------------------------------------------------ layout
 
@@ -825,7 +902,7 @@ class MainWindow(ctk.CTk):
                 return
             self.cancel.set()
         try:
-            self.cfg.window_geometry = self.geometry()
+            self._remember_size()
             self.cfg.save()
         except Exception:                                   # noqa: BLE001
             pass
